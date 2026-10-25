@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Package & Git installation**: moved `@opencode/plugin` to `peerDependencies`, relaxed `solid-js` peer constraint to `>=1.9.0`, and marked all host-provided `peerDependencies` as `optional: true` in `peerDependenciesMeta` to prevent `ERESOLVE` conflicts with `@opentui/solid`'s `solid-js@1.9.12` peer requirement
+- **Git dependency preparation**: renamed `scripts.build` to `scripts.compile` and tracked compiled `dist/` artifacts so `pacote` does not trigger `/$bunfs/bin/npm-cli.js install` inside the compiled `opencode` binary during Git installs
+- **OpenTUI 0.6+ compatibility**: updated `asPromptTextarea()` and `accept()` to support `invalidateIntrinsicSize()` (replacing `getLayoutNode().markDirty()`, which was removed in OpenTUI 0.6 / OpenCode 2.1+) while retaining a fallback for OpenCode 2.0.x
+
 ## [0.1.0] - 2026-09-22
 
 ### Changed

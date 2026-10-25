@@ -23,11 +23,14 @@ function makeTextarea() {
     placeholder: undefined,
     isDestroyed: false,
     inserted: [] as string[],
+    invalidatedCount: 0,
     insertText(value: string) {
       el.inserted.push(value)
       el.plainText += value
     },
-    getLayoutNode: () => ({ markDirty() {} }),
+    invalidateIntrinsicSize() {
+      el.invalidatedCount += 1
+    },
     gotoBufferEnd() {},
   }
   return el
@@ -351,4 +354,49 @@ test("single-line input focused → hidden and un-accepted; refocus restores the
   if (typeof cleanup === "function") await cleanup()
   // dispose clears our marker from the focused textarea
   expect(fixture.editor.placeholder).toBeNull()
+})
+
+test("accept supports both OpenTUI 0.6 invalidateIntrinsicSize and OpenTUI 0.5 getLayoutNode", async () => {
+  const fixture = createFixture()
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.fire("session.status", idleEvent)
+  await sleep(30)
+
+  const layer = fixture.layers[0]()
+  const command = layer.commands.find((item: any) => item.id === "opencode-next-prompt.accept")
+
+  // OpenTUI 0.6+ path: calls invalidateIntrinsicSize()
+  expect(command.run()).toBe(false)
+  await sleep(10)
+  expect(fixture.editor.invalidatedCount).toBe(1)
+
+  // OpenTUI 0.5 fallback path: calls getLayoutNode().markDirty() when invalidateIntrinsicSize is absent
+  let markedDirty = 0
+  const legacyEditor: Record<string, any> = {
+    plainText: "",
+    placeholder: undefined,
+    isDestroyed: false,
+    inserted: [] as string[],
+    insertText(value: string) {
+      legacyEditor.inserted.push(value)
+      legacyEditor.plainText += value
+    },
+    getLayoutNode: () => ({
+      markDirty() {
+        markedDirty += 1
+      },
+    }),
+    gotoBufferEnd() {},
+  }
+  fixture.focused = legacyEditor
+  fixture.fireRenderer("focused_editor", legacyEditor, fixture.editor)
+  expect(legacyEditor.placeholder).toBe(` [→] ${SUGGESTION}`)
+  expect(command.run()).toBe(false)
+  await sleep(10)
+  expect(legacyEditor.inserted).toEqual([SUGGESTION])
+  expect(markedDirty).toBe(1)
+
+  if (typeof cleanup === "function") await cleanup()
 })

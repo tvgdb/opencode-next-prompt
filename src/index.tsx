@@ -175,7 +175,13 @@ const opencodeNextPrompt = Plugin.define({
       editor.insertText(current.text)
       setTimeout(() => {
         if (editor.isDestroyed) return
-        editor.getLayoutNode().markDirty()
+        // OpenTUI 0.6+ removed getLayoutNode() in favor of invalidateIntrinsicSize();
+        // fall back to getLayoutNode().markDirty() for OpenCode 2.0.x (OpenTUI 0.5).
+        if (typeof editor.invalidateIntrinsicSize === "function") {
+          editor.invalidateIntrinsicSize()
+        } else {
+          editor.getLayoutNode?.().markDirty()
+        }
         editor.gotoBufferEnd()
         context.renderer.requestRender()
       }, 0)

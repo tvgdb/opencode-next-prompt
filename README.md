@@ -14,6 +14,12 @@ Add to `~/.config/opencode/cli.json`:
 }
 ```
 
+Or install via the OpenCode CLI:
+
+```sh
+opencode plugin add opencode-next-prompt
+```
+
 Restart opencode. The package and its dependencies are installed automatically.
 
 > TUI plugins are declared in `cli.json`'s `plugins` array (the successor of `tui.json`'s `plugin` array); the `plugin` array in `opencode.json` is for server plugins.
