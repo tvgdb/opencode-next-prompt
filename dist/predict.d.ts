@@ -1,4 +1,4 @@
-import type { ModelRef, OpenCodeClient } from "@opencode/client";
+import type { OpenCodeClient } from "@opencode/client";
 export type ConversationTurn = {
     id: string;
     role: "user" | "assistant";
@@ -15,16 +15,23 @@ export type PredictResult = {
     ok: false;
 };
 export type Predictor = {
-    predict(sessionID: string, model: ModelRef | undefined, turns: ConversationTurn[], variant?: string): Promise<PredictResult>;
+    predict(sessionID: string, model: {
+        providerID: string;
+        id: string;
+    } | undefined, turns: ConversationTurn[], variant?: string, location?: {
+        directory: string;
+    }): Promise<PredictResult>;
     dispose(): Promise<void>;
 };
 /**
- * By default, prediction runs through `session.generate` (`POST /api/session/:sessionID/generate`),
- * which executes in the session's own `Location` (honoring project-scoped providers and models in
- * `opencode.jsonc`, reusing the session's prompt cache, and mutating nothing).
- *
- * When the user explicitly configures `options.model`, we try `generate.text` first so the custom
- * model/variant override takes effect, and fall back to `session.generate` if `generate.text` fails
- * (for example, when the provider is only defined in the project config rather than global config).
+ * Prediction runs through a lightweight, tool-denied helper session in the active
+ * session's `Location` using `session.generate` (`POST /api/session/:sessionID/generate`):
+ * - `location` ensures project-scoped providers and models in `opencode.jsonc` resolve.
+ * - `permissions: [{ action: "*", resource: "*", effect: "deny" }]` strips all MCP tools,
+ *   skills, and MCP instructions from the request context.
+ * - `model: spec` applies the resolved fast/small model (e.g. `agents["next-prompt"].model`
+ *   or `agents.title.model`) and minimal/low reasoning variant.
+ * - `session.generate` writes no messages and emits no execution events, and the empty
+ *   helper session is removed immediately after the call completes.
  */
 export declare function createPredictor(client: OpenCodeClient, options: PredictOptions): Predictor;

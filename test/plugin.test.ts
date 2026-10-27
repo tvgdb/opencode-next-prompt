@@ -49,6 +49,8 @@ function createFixture(options: Record<string, unknown> = {}) {
   const listeners: Array<(event: { details: { type: string; data?: unknown } }) => void> = []
   const rendererHandlers = new Map<string, Array<(...args: any[]) => void>>()
   const toasts: any[] = []
+  const sessionCreateCalls: any[] = []
+  const sessionRemoveCalls: any[] = []
   const sessionGenerateCalls: any[] = []
   const generateTextCalls: any[] = []
   const layers: Array<() => any> = []
@@ -57,6 +59,7 @@ function createFixture(options: Record<string, unknown> = {}) {
   let slotClaim: any
   let slotDisposed = false
   let sessionStatus = "idle"
+  let agents: any[] = []
 
   const messages: any[] = [
     { id: "msg_u1", type: "user", text: "修复登录问题" },
@@ -88,6 +91,13 @@ function createFixture(options: Record<string, unknown> = {}) {
     },
     client: {
       session: {
+        create: async (input: any) => {
+          sessionCreateCalls.push(input)
+          return { id: "ses_helper" }
+        },
+        remove: async (input: any) => {
+          sessionRemoveCalls.push(input)
+        },
         generate: async (input: any) => {
           sessionGenerateCalls.push(input)
           return { text: SUGGESTION }
@@ -121,11 +131,21 @@ function createFixture(options: Record<string, unknown> = {}) {
       session: {
         status: () => sessionStatus,
         message: { list: () => messages },
-        get: () => ({ id: SESSION_ID, model: { providerID: "acme", id: "fast" } }),
+        get: () => ({
+          id: SESSION_ID,
+          location: { directory: "/tmp/e2e" },
+          model: { providerID: "acme", id: "fast", variant: "high" },
+        }),
       },
       location: {
+        agent: {
+          list: () => agents,
+        },
         model: {
-          list: () => [{ providerID: "acme", modelID: "fast", variants: [{ id: "high" }, { id: "low" }] }],
+          list: () => [
+            { providerID: "acme", modelID: "fast", variants: [{ id: "high" }, { id: "low" }] },
+            { providerID: "acme", modelID: "lite", variants: [{ id: "high" }, { id: "low" }, { id: "minimal" }] },
+          ],
         },
         provider: { list: () => [{ id: "acme" }] },
       },
@@ -152,10 +172,15 @@ function createFixture(options: Record<string, unknown> = {}) {
     editor,
     toasts,
     generateCalls: sessionGenerateCalls,
+    sessionCreateCalls,
+    sessionRemoveCalls,
     sessionGenerateCalls,
     generateTextCalls,
     layers,
     subscribed,
+    set agents(value: any[]) {
+      agents = value
+    },
     get slotClaim() {
       return slotClaim
     },
@@ -207,10 +232,18 @@ test("idle triggers prediction, placeholder shows, accept key fills, busy clears
   fixture.fire("session.status", idleEvent)
   await sleep(30)
 
+  expect(fixture.sessionCreateCalls.length).toBe(1)
+  expect(fixture.sessionCreateCalls[0]).toEqual({
+    title: "next-prompt-suggestion",
+    location: { directory: "/tmp/e2e" },
+    model: { providerID: "acme", id: "fast", variant: "low" },
+    permissions: [{ action: "*", resource: "*", effect: "deny" }],
+  })
   expect(fixture.sessionGenerateCalls.length).toBe(1)
+  expect(fixture.sessionRemoveCalls).toEqual([{ sessionID: "ses_helper" }])
   expect(fixture.generateTextCalls.length).toBe(0)
   const call = fixture.sessionGenerateCalls[0]
-  expect(call.sessionID).toBe(SESSION_ID)
+  expect(call.sessionID).toBe("ses_helper")
   // tool-suppression instruction + conversation context rendered into the prompt
   expect(call.prompt).toContain("Do not call any tools and do not take any actions.")
   expect(call.prompt).toContain("user: 修复登录问题")
@@ -260,8 +293,30 @@ test("unknown configured model → one error toast, no prediction call", async (
 
   expect(fixture.generateCalls.length).toBe(0)
   expect(fixture.toasts.length).toBe(1)
-  expect(fixture.toasts[0].message).toContain('model "missing" not found on provider "acme"')
+  expect(fixture.toasts[0].message).toContain('model "missing" not found on provider "acme" (available models: fast, lite)')
   expect(fixture.toasts[0].variant).toBe("error")
+})
+
+test("uses agents.title.model or agents['next-prompt'].model from opencode.jsonc with minimal variant", async () => {
+  const fixture = createFixture()
+  fixture.agents = [
+    { id: "title", model: { providerID: "acme", id: "lite" } },
+  ]
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.fire("session.status", idleEvent)
+  await sleep(30)
+
+  expect(fixture.sessionCreateCalls.length).toBe(1)
+  expect(fixture.sessionCreateCalls[0].model).toEqual({
+    providerID: "acme",
+    id: "lite",
+    variant: "minimal",
+  })
+  expect(fixture.editor.placeholder).toBe(` [→] ${SUGGESTION}`)
+
+  if (typeof cleanup === "function") await cleanup()
 })
 
 test("revert of the current session invalidates the suggestion; other sessions do not", async () => {
@@ -287,10 +342,11 @@ test("revert of the current session invalidates the suggestion; other sessions d
   if (typeof cleanup === "function") await cleanup()
 })
 
-test("custom options.model uses generate.text and falls back to session.generate for project-scoped providers", async () => {
+test("when session.create is unavailable, custom options.model tries generate.text then falls back to session.generate", async () => {
   const fixture = createFixture({ model: "acme/fast" })
   const generateTextCalls: any[] = []
   const sessionGenerateCalls: any[] = []
+  delete (fixture.context.client.session as any).create
   // Project-scoped provider: global generate.text rejects with ModelNotFoundError,
   // while session.generate runs in the project's LocationService and succeeds.
   ;(fixture.context.client.generate as any).text = async (input: any) => {

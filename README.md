@@ -52,9 +52,26 @@ Restart opencode. The package and its dependencies are installed automatically.
 |---|---|---|
 | `acceptKey` | `right` | Key to accept the suggestion (only effective while the input is empty) |
 | `timeoutMs` | `20000` | Per-prediction timeout; the timed-out call is aborted and retried once |
-| `model` | unset | Fast model for predictions as `provider/model`; a bare model id uses the session's provider. Defaults to the current session's model. Unknown providers/models are rejected with an error toast |
-| `variant` | auto | Model variant (reasoning effort) used for predictions. By default the lowest variant the model supports is picked automatically (e.g. `low`); models without variants are left untouched. Set it explicitly (e.g. `"high"`) to override, or `"default"` to disable |
+| `model` | unset | Fast model for predictions as `provider/model` (or `provider/model#variant`); a bare model id uses the session's provider. Falls back to `agents["next-prompt"].model`, then `agents.title.model` in `opencode.json(c)`, then the current session's model. Unknown providers/models are rejected with an error toast |
+| `variant` | auto | Model variant (reasoning effort) used for predictions. By default the lowest variant the model supports is picked automatically (e.g. `none`, `minimal`, `low`); models without variants are left untouched. Set it explicitly (e.g. `"high"`) to override, or `"default"` to disable |
 | `includeToolContext` | `false` | Include summarized tool calls and outputs in the prediction context (more context, more tokens) |
+
+You can also configure the prediction model per-project or globally in `opencode.json(c)` under `agents` (or rely on `agents.title.model`, which is used automatically when `agents["next-prompt"]` is not set):
+
+```jsonc
+{
+  "agents": {
+    "title": {
+      "model": "my-provider/fast-model"
+    },
+    // Optional dedicated override for next-prompt suggestions:
+    "next-prompt": {
+      "model": "my-provider/fast-model",
+      "hidden": true
+    }
+  }
+}
+```
 
 The accept command is registered as `opencode-next-prompt.accept`, so it can be rebound in `cli.json`'s `keybinds`.
 

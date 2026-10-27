@@ -102,8 +102,9 @@ const opencodeNextPrompt = Plugin.define({
                 return;
             }
             const session = context.data.session.get(sessionID);
-            const modelRef = resolveModelRef(options.model, session?.model, context);
-            const modelIssue = checkModelConfig(options.model, modelRef, context);
+            const location = session?.location ?? context.location;
+            const modelRef = resolveModelRef(options.model, session?.model, context, location);
+            const modelIssue = checkModelConfig(modelRef, context, location);
             if (modelIssue) {
                 if (reportedModelIssue !== modelIssue) {
                     reportedModelIssue = modelIssue;
@@ -124,9 +125,10 @@ const opencodeNextPrompt = Plugin.define({
             }
             inFlightUserMessageID = userMessageID;
             const variant = resolveVariant(options.variant, modelRef);
+            const selectedModel = modelRef ? { providerID: modelRef.providerID, id: modelRef.id } : session?.model;
             try {
-                debug("predicting", { sessionID, model: session?.model, variant });
-                const result = await predictor.predict(sessionID, session?.model, turns, variant);
+                debug("predicting", { sessionID, model: selectedModel, variant, source: modelRef?.source });
+                const result = await predictor.predict(sessionID, selectedModel, turns, variant, location);
                 if (inFlightUserMessageID !== userMessageID)
                     return;
                 debug("predict result", { ok: result.ok, length: result.ok ? (result.text?.length ?? 0) : -1 });
@@ -298,35 +300,88 @@ const opencodeNextPrompt = Plugin.define({
         };
     },
 });
-function resolveModelRef(spec, sessionModel, context) {
-    const slash = spec?.indexOf("/") ?? -1;
-    if (spec && slash > 0 && slash < spec.length - 1) {
-        const providerID = spec.slice(0, slash);
-        const modelID = spec.slice(slash + 1);
-        return { providerID, id: modelID, model: findModel(context, providerID, modelID) };
+const NEXT_PROMPT_AGENT_IDS = ["next-prompt", "next_prompt"];
+function findConfiguredAgentModel(context, location) {
+    const agents = context.data.location.agent?.list(location);
+    if (!agents)
+        return undefined;
+    for (const id of NEXT_PROMPT_AGENT_IDS) {
+        const match = agents.find((agent) => agent.id === id && agent.model !== undefined);
+        if (match?.model)
+            return { model: match.model, source: "agent:next-prompt", explicit: true };
+    }
+    const titleAgent = agents.find((agent) => agent.id === "title" && agent.model !== undefined);
+    if (titleAgent?.model)
+        return { model: titleAgent.model, source: "agent:title", explicit: false };
+    return undefined;
+}
+function parseSpec(spec) {
+    const hash = spec.indexOf("#");
+    const base = hash >= 0 ? spec.slice(0, hash) : spec;
+    const variant = hash >= 0 && hash < spec.length - 1 ? spec.slice(hash + 1) : undefined;
+    const slash = base.indexOf("/");
+    if (slash > 0 && slash < base.length - 1) {
+        return { providerID: base.slice(0, slash), id: base.slice(slash + 1), variant };
+    }
+    return { id: base, variant };
+}
+function resolveModelRef(spec, sessionModel, context, location) {
+    const agentConfig = findConfiguredAgentModel(context, location);
+    if (spec) {
+        const parsed = parseSpec(spec);
+        const providerID = parsed.providerID ?? agentConfig?.model.providerID ?? sessionModel?.providerID;
+        if (!providerID || !parsed.id)
+            return undefined;
+        return {
+            providerID,
+            id: parsed.id,
+            variant: parsed.variant,
+            explicit: true,
+            source: "options",
+            model: findModel(context, providerID, parsed.id, location),
+        };
+    }
+    if (agentConfig) {
+        const { providerID, id, variant } = agentConfig.model;
+        return {
+            providerID,
+            id,
+            variant,
+            explicit: agentConfig.explicit,
+            source: agentConfig.source,
+            model: findModel(context, providerID, id, location),
+        };
     }
     const providerID = sessionModel?.providerID;
-    const modelID = spec ?? sessionModel?.id;
+    const modelID = sessionModel?.id;
     if (!providerID || !modelID)
         return undefined;
-    return { providerID, id: modelID, model: findModel(context, providerID, modelID) };
+    return {
+        providerID,
+        id: modelID,
+        explicit: false,
+        source: "session",
+        model: findModel(context, providerID, modelID, location),
+    };
 }
-function findModel(context, providerID, modelID) {
-    return context.data.location.model.list()?.find((item) => item.providerID === providerID && item.modelID === modelID);
+function findModel(context, providerID, modelID, location) {
+    return context.data.location.model
+        .list(location)
+        ?.find((item) => item.providerID === providerID && (item.modelID ?? item.id) === modelID);
 }
-function checkModelConfig(spec, ref, context) {
-    if (!spec || !ref)
+function checkModelConfig(ref, context, location) {
+    if (!ref?.explicit)
         return undefined;
-    const providers = context.data.location.provider.list();
+    const providers = context.data.location.provider.list(location);
     if (providers && !providers.some((item) => item.id === ref.providerID)) {
         const available = providers.map((item) => item.id).join(", ");
         return `model config error: provider "${ref.providerID}" not found${available ? ` (available providers: ${available})` : ""}`;
     }
-    const models = context.data.location.model.list();
-    if (models && !models.some((item) => item.providerID === ref.providerID && item.modelID === ref.id)) {
+    const models = context.data.location.model.list(location);
+    if (models && !models.some((item) => item.providerID === ref.providerID && (item.modelID ?? item.id) === ref.id)) {
         const available = models
             .filter((item) => item.providerID === ref.providerID)
-            .map((item) => item.modelID)
+            .map((item) => item.modelID ?? item.id)
             .slice(0, 10)
             .join(", ");
         const count = models.filter((item) => item.providerID === ref.providerID).length;
@@ -334,19 +389,18 @@ function checkModelConfig(spec, ref, context) {
     }
     return undefined;
 }
-const VARIANT_ORDER = ["none", "low", "min", "medium", "high", "xhigh", "max"];
+const VARIANT_ORDER = ["none", "minimal", "min", "low", "medium", "high", "xhigh", "max"];
 function resolveVariant(configVariant, ref) {
     if (configVariant === "default")
         return undefined;
     if (configVariant)
         return configVariant;
+    if (ref?.variant)
+        return ref.variant;
     const variants = ref?.model?.variants;
     if (!variants || variants.length === 0)
         return undefined;
     const names = variants.map((item) => item.id);
-    const low = names.find((name) => name.toLowerCase() === "low");
-    if (low)
-        return low;
     return names.toSorted((a, b) => variantRank(a) - variantRank(b))[0];
 }
 function variantRank(name) {
