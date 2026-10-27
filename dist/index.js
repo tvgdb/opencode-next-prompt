@@ -1,7 +1,7 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { createSuggestionStore } from "./state.js";
 import { createPredictor } from "./predict.js";
-import { createPlaceholderController } from "./ui.js";
+import { createPlaceholderController, isShellPlaceholder } from "./ui.js";
 import { asPromptTextarea } from "./editor.js";
 import { debug } from "./debug.js";
 const DEFAULT_OPTIONS = {
@@ -29,7 +29,7 @@ const opencodeNextPrompt = Plugin.define({
         };
         const promptInputIsEmpty = () => {
             const editor = asPromptTextarea(context.renderer.currentFocusedEditor);
-            return editor !== null && editor.plainText === "";
+            return editor !== null && editor.plainText === "" && !isShellPlaceholder(editor.placeholder);
         };
         const conversationTurns = (sessionID) => {
             const result = [];
@@ -62,6 +62,7 @@ const opencodeNextPrompt = Plugin.define({
             }
             return undefined;
         };
+        let activeSessionID = currentSessionID();
         let inFlightUserMessageID;
         let completedUserMessageID;
         let retriedUserMessageID;
@@ -70,10 +71,18 @@ const opencodeNextPrompt = Plugin.define({
             timeoutMs: options.timeoutMs,
             model: options.model,
         });
+        const syncActiveSession = () => {
+            const current = currentSessionID();
+            if (current !== activeSessionID) {
+                activeSessionID = current;
+                invalidate();
+            }
+            return current;
+        };
         const maybePredict = async () => {
             if (disposed)
                 return;
-            const sessionID = currentSessionID();
+            const sessionID = syncActiveSession();
             if (!sessionID) {
                 debug("skip", "no session route");
                 return;
@@ -116,8 +125,8 @@ const opencodeNextPrompt = Plugin.define({
             inFlightUserMessageID = userMessageID;
             const variant = resolveVariant(options.variant, modelRef);
             try {
-                debug("predicting", { model: session?.model, variant });
-                const result = await predictor.predict(session?.model, turns, variant);
+                debug("predicting", { sessionID, model: session?.model, variant });
+                const result = await predictor.predict(sessionID, session?.model, turns, variant);
                 if (inFlightUserMessageID !== userMessageID)
                     return;
                 debug("predict result", { ok: result.ok, length: result.ok ? (result.text?.length ?? 0) : -1 });
@@ -181,7 +190,7 @@ const opencodeNextPrompt = Plugin.define({
         };
         const unsubscribers = [];
         unsubscribers.push(context.data.on("session.status", (event) => {
-            if (event.data.sessionID !== currentSessionID())
+            if (event.data.sessionID !== syncActiveSession())
                 return;
             const type = event.data.status.type;
             debug("session.status event", { type });
@@ -197,14 +206,14 @@ const opencodeNextPrompt = Plugin.define({
         // while session.status appears not to reach clients at all. Mirrors the
         // V1 busy/idle pair: started ≈ busy (user submitted), ended ≈ idle.
         unsubscribers.push(context.data.on("session.execution.started", (event) => {
-            if (event.data.sessionID !== currentSessionID())
+            if (event.data.sessionID !== syncActiveSession())
                 return;
             debug("execution started");
             store.discard();
         }));
         for (const type of ["session.execution.succeeded", "session.execution.interrupted"]) {
             unsubscribers.push(context.data.on(type, (event) => {
-                if (event.data.sessionID !== currentSessionID())
+                if (event.data.sessionID !== syncActiveSession())
                     return;
                 debug(type);
                 if (store.read().kind === "idle")
@@ -225,7 +234,10 @@ const opencodeNextPrompt = Plugin.define({
                 debug("event(first-seen)", type);
             }
         }));
-        unsubscribers.push(context.data.on("tui.session.select", () => invalidate()));
+        unsubscribers.push(context.data.on("tui.session.select", () => {
+            activeSessionID = currentSessionID();
+            invalidate();
+        }));
         // V1's message.removed / message.part.removed: history changed under us.
         unsubscribers.push(context.data.on("session.revert.committed", (event) => {
             if (event.data.sessionID === currentSessionID())

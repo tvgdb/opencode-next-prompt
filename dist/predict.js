@@ -7,6 +7,7 @@ Address the assistant directly: a request, a question, or an instruction
 (the assistant acts; you never describe doing things yourself). React to
 what was said, not to how it was said. One line, natural and brief, in
 your language and tone.
+Do not call any tools and do not take any actions. Reply with plain text only.
 
 If nothing plausible remains to say, reply with exactly: NO_SUGGESTION
 
@@ -16,56 +17,71 @@ const MAX_PREDICTION_CHARS = 170;
 const MAX_TURNS = 8;
 const MAX_TURN_CHARS = 800;
 /**
- * Prediction runs through the tool-free `generate.text` endpoint: no session
- * is created, so there is nothing to abort or clean up beyond the request
- * itself, which is cancelled by an AbortSignal on timeout.
+ * By default, prediction runs through `session.generate` (`POST /api/session/:sessionID/generate`),
+ * which executes in the session's own `Location` (honoring project-scoped providers and models in
+ * `opencode.jsonc`, reusing the session's prompt cache, and mutating nothing).
  *
- * Model fallback: some gates — notably OpenCode's free tier — reject
- * explicitly selected models on this endpoint (503) while letting the server
- * default through, so a failed call with a specified model is retried once
- * without a model instead of failing the whole prediction. Both attempts
- * share one timeout budget.
+ * When the user explicitly configures `options.model`, we try `generate.text` first so the custom
+ * model/variant override takes effect, and fall back to `session.generate` if `generate.text` fails
+ * (for example, when the provider is only defined in the project config rather than global config).
  */
 export function createPredictor(client, options) {
     return {
-        async predict(model, turns, variant) {
+        async predict(sessionID, model, turns, variant) {
             if (turns.length === 0)
                 return { ok: true, text: null };
             const prompt = PROMPT + renderConversation(turns);
             const ref = resolveModel(options.model, model);
+            const spec = ref ? { providerID: ref.providerID, id: ref.id, ...(variant ? { variant } : {}) } : undefined;
             const deadline = Date.now() + options.timeoutMs;
-            const attempt = async (spec) => {
+            const runWithTimeout = async (call) => {
                 const remaining = deadline - Date.now();
                 if (remaining <= 0)
                     return { ok: false };
                 const controller = new AbortController();
                 const timer = setTimeout(() => controller.abort(), remaining);
                 try {
-                    const result = await client.generate.text({ prompt, model: spec }, { signal: controller.signal });
+                    const result = await call(controller.signal);
                     return { ok: true, text: parsePrediction(result.text) };
                 }
                 finally {
                     clearTimeout(timer);
                 }
             };
-            const spec = ref ? { providerID: ref.providerID, id: ref.id, ...(variant ? { variant } : {}) } : undefined;
-            try {
-                return await attempt(spec);
+            const hasSessionGenerate = typeof client.session?.generate === "function";
+            const hasGenerateText = typeof client.generate?.text === "function";
+            if (options.model && spec && hasGenerateText) {
+                try {
+                    return await runWithTimeout((signal) => client.generate.text({ prompt, model: spec }, { signal }));
+                }
+                catch (error) {
+                    if (!hasSessionGenerate) {
+                        debug("generate failed", errorMessage(error));
+                        return { ok: false };
+                    }
+                    debug("generate.text with custom model failed, falling back to session.generate", errorMessage(error));
+                }
             }
-            catch (error) {
-                if (!spec) {
+            if (hasSessionGenerate) {
+                try {
+                    return await runWithTimeout((signal) => client.session.generate({ sessionID, prompt }, { signal }));
+                }
+                catch (error) {
+                    debug("session.generate failed", errorMessage(error));
+                    return { ok: false };
+                }
+            }
+            if (hasGenerateText) {
+                try {
+                    return await runWithTimeout((signal) => client.generate.text({ prompt, model: spec }, { signal }));
+                }
+                catch (error) {
                     debug("generate failed", errorMessage(error));
                     return { ok: false };
                 }
-                debug("generate with explicit model failed, retrying with server default", errorMessage(error));
             }
-            try {
-                return await attempt(undefined);
-            }
-            catch (error) {
-                debug("generate failed", errorMessage(error));
-                return { ok: false };
-            }
+            debug("no generation endpoint available on client");
+            return { ok: false };
         },
         async dispose() {
             // Nothing to clean up: predictions do not own a session.

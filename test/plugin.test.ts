@@ -49,7 +49,8 @@ function createFixture(options: Record<string, unknown> = {}) {
   const listeners: Array<(event: { details: { type: string; data?: unknown } }) => void> = []
   const rendererHandlers = new Map<string, Array<(...args: any[]) => void>>()
   const toasts: any[] = []
-  const generateCalls: any[] = []
+  const sessionGenerateCalls: any[] = []
+  const generateTextCalls: any[] = []
   const layers: Array<() => any> = []
   const editor = makeTextarea()
   let focused: any = editor
@@ -86,9 +87,15 @@ function createFixture(options: Record<string, unknown> = {}) {
       requestRender() {},
     },
     client: {
+      session: {
+        generate: async (input: any) => {
+          sessionGenerateCalls.push(input)
+          return { text: SUGGESTION }
+        },
+      },
       generate: {
         text: async (input: any) => {
-          generateCalls.push(input)
+          generateTextCalls.push(input)
           return { text: SUGGESTION }
         },
       },
@@ -144,7 +151,9 @@ function createFixture(options: Record<string, unknown> = {}) {
     context,
     editor,
     toasts,
-    generateCalls,
+    generateCalls: sessionGenerateCalls,
+    sessionGenerateCalls,
+    generateTextCalls,
     layers,
     subscribed,
     get slotClaim() {
@@ -198,11 +207,12 @@ test("idle triggers prediction, placeholder shows, accept key fills, busy clears
   fixture.fire("session.status", idleEvent)
   await sleep(30)
 
-  expect(fixture.generateCalls.length).toBe(1)
-  const call = fixture.generateCalls[0]
-  // session model + auto-picked lowest variant
-  expect(call.model).toEqual({ providerID: "acme", id: "fast", variant: "low" })
-  // conversation context rendered into the prompt
+  expect(fixture.sessionGenerateCalls.length).toBe(1)
+  expect(fixture.generateTextCalls.length).toBe(0)
+  const call = fixture.sessionGenerateCalls[0]
+  expect(call.sessionID).toBe(SESSION_ID)
+  // tool-suppression instruction + conversation context rendered into the prompt
+  expect(call.prompt).toContain("Do not call any tools and do not take any actions.")
   expect(call.prompt).toContain("user: 修复登录问题")
   expect(call.prompt).toContain("assistant: 已经修好了，原因是时区判断写反了。")
   // suggestion lands in the placeholder with the accept-key marker
@@ -277,14 +287,18 @@ test("revert of the current session invalidates the suggestion; other sessions d
   if (typeof cleanup === "function") await cleanup()
 })
 
-test("generate with the session model rejected → falls back to the server default", async () => {
-  const fixture = createFixture()
-  const calls: any[] = []
-  // Free-tier style gate: explicitly selected models are refused, the
-  // server default is not.
+test("custom options.model uses generate.text and falls back to session.generate for project-scoped providers", async () => {
+  const fixture = createFixture({ model: "acme/fast" })
+  const generateTextCalls: any[] = []
+  const sessionGenerateCalls: any[] = []
+  // Project-scoped provider: global generate.text rejects with ModelNotFoundError,
+  // while session.generate runs in the project's LocationService and succeeds.
   ;(fixture.context.client.generate as any).text = async (input: any) => {
-    calls.push(input)
-    if (input.model) throw new Error("Error from provider (Console): OpenCode's free tier can only be used from within OpenCode")
+    generateTextCalls.push(input)
+    throw new Error("ModelNotFoundError: acme/fast not found in global config")
+  }
+  ;(fixture.context.client.session as any).generate = async (input: any) => {
+    sessionGenerateCalls.push(input)
     return { text: SUGGESTION }
   }
   const cleanup = await plugin.setup(fixture.context)
@@ -293,9 +307,37 @@ test("generate with the session model rejected → falls back to the server defa
   fixture.fire("session.status", idleEvent)
   await sleep(30)
 
-  expect(calls.length).toBe(2)
-  expect(calls[0].model).toEqual({ providerID: "acme", id: "fast", variant: "low" })
-  expect(calls[1].model).toBeUndefined()
+  expect(generateTextCalls.length).toBe(1)
+  expect(generateTextCalls[0].model).toEqual({ providerID: "acme", id: "fast", variant: "low" })
+  expect(sessionGenerateCalls.length).toBe(1)
+  expect(sessionGenerateCalls[0].sessionID).toBe(SESSION_ID)
+  expect(fixture.editor.placeholder).toBe(` [→] ${SUGGESTION}`)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
+test("shell mode placeholder is not overwritten and accept key does not insert into shell mode", async () => {
+  const fixture = createFixture()
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.fire("session.status", idleEvent)
+  await sleep(30)
+  expect(fixture.editor.placeholder).toBe(` [→] ${SUGGESTION}`)
+
+  // User presses `!` to enter shell mode; TUI sets shell placeholder
+  fixture.editor.placeholder = 'Run a command… "git status"'
+  fixture.fireRenderer("frame")
+  expect(fixture.editor.placeholder).toBe('Run a command… "git status"')
+
+  const layer = fixture.layers[0]()
+  const command = layer.commands.find((item: any) => item.id === "opencode-next-prompt.accept")
+  expect(command.run()).toBe(false)
+  expect(fixture.editor.inserted).toEqual([])
+
+  // Leaving shell mode restores suggestion on next frame
+  fixture.editor.placeholder = null
+  fixture.fireRenderer("frame")
   expect(fixture.editor.placeholder).toBe(` [→] ${SUGGESTION}`)
 
   if (typeof cleanup === "function") await cleanup()

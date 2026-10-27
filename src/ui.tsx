@@ -10,6 +10,12 @@ const ARROW_KEYS: Record<string, string> = {
   down: "↓",
 }
 
+const SHELL_PLACEHOLDER_PREFIX = "Run a command"
+
+export function isShellPlaceholder(placeholder: unknown): boolean {
+  return typeof placeholder === "string" && placeholder.startsWith(SHELL_PLACEHOLDER_PREFIX)
+}
+
 function displayKey(key: string): string {
   return ARROW_KEYS[key] ?? key
 }
@@ -42,6 +48,7 @@ export function createPlaceholderController(context: Context, store: SuggestionS
       editor: editor !== null,
     })
     if (!editor) return
+    if (isShellPlaceholder(editor.placeholder)) return
     if (current.kind === "ready" && current.sessionID === sessionID()) {
       const desired = marker + current.text
       // Write only on real changes: the setter is idempotent, which is what

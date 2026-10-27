@@ -3,7 +3,7 @@ import type { Context, KeymapLayer } from "@opencode/plugin/tui/context"
 import type { ModelInfo, ModelRef, ProviderInfo } from "@opencode/client"
 import { createSuggestionStore } from "./state.ts"
 import { createPredictor, type ConversationTurn } from "./predict.ts"
-import { createPlaceholderController } from "./ui.tsx"
+import { createPlaceholderController, isShellPlaceholder } from "./ui.tsx"
 import { asPromptTextarea } from "./editor.ts"
 import { debug } from "./debug.ts"
 
@@ -45,7 +45,7 @@ const opencodeNextPrompt = Plugin.define({
 
     const promptInputIsEmpty = (): boolean => {
       const editor = asPromptTextarea(context.renderer.currentFocusedEditor)
-      return editor !== null && editor.plainText === ""
+      return editor !== null && editor.plainText === "" && !isShellPlaceholder(editor.placeholder)
     }
 
     const conversationTurns = (sessionID: string): ConversationTurn[] => {
@@ -76,6 +76,7 @@ const opencodeNextPrompt = Plugin.define({
       return undefined
     }
 
+    let activeSessionID: string | undefined = currentSessionID()
     let inFlightUserMessageID: string | undefined
     let completedUserMessageID: string | undefined
     let retriedUserMessageID: string | undefined
@@ -86,9 +87,18 @@ const opencodeNextPrompt = Plugin.define({
       model: options.model,
     })
 
+    const syncActiveSession = (): string | undefined => {
+      const current = currentSessionID()
+      if (current !== activeSessionID) {
+        activeSessionID = current
+        invalidate()
+      }
+      return current
+    }
+
     const maybePredict = async (): Promise<void> => {
       if (disposed) return
-      const sessionID = currentSessionID()
+      const sessionID = syncActiveSession()
       if (!sessionID) {
         debug("skip", "no session route")
         return
@@ -131,8 +141,8 @@ const opencodeNextPrompt = Plugin.define({
       inFlightUserMessageID = userMessageID
       const variant = resolveVariant(options.variant, modelRef)
       try {
-        debug("predicting", { model: session?.model, variant })
-        const result = await predictor.predict(session?.model, turns, variant)
+        debug("predicting", { sessionID, model: session?.model, variant })
+        const result = await predictor.predict(sessionID, session?.model, turns, variant)
         if (inFlightUserMessageID !== userMessageID) return
         debug("predict result", { ok: result.ok, length: result.ok ? (result.text?.length ?? 0) : -1 })
         if (result.ok) {
@@ -190,7 +200,7 @@ const opencodeNextPrompt = Plugin.define({
     const unsubscribers: Array<() => void> = []
     unsubscribers.push(
       context.data.on("session.status", (event) => {
-        if (event.data.sessionID !== currentSessionID()) return
+        if (event.data.sessionID !== syncActiveSession()) return
         const type = event.data.status.type
         debug("session.status event", { type })
         if (type === "busy") {
@@ -206,7 +216,7 @@ const opencodeNextPrompt = Plugin.define({
     // V1 busy/idle pair: started ≈ busy (user submitted), ended ≈ idle.
     unsubscribers.push(
       context.data.on("session.execution.started", (event) => {
-        if (event.data.sessionID !== currentSessionID()) return
+        if (event.data.sessionID !== syncActiveSession()) return
         debug("execution started")
         store.discard()
       }),
@@ -214,7 +224,7 @@ const opencodeNextPrompt = Plugin.define({
     for (const type of ["session.execution.succeeded", "session.execution.interrupted"] as const) {
       unsubscribers.push(
         context.data.on(type, (event) => {
-          if (event.data.sessionID !== currentSessionID()) return
+          if (event.data.sessionID !== syncActiveSession()) return
           debug(type)
           if (store.read().kind === "idle") void maybePredict()
         }),
@@ -238,7 +248,12 @@ const opencodeNextPrompt = Plugin.define({
       }),
     )
 
-    unsubscribers.push(context.data.on("tui.session.select", () => invalidate()))
+    unsubscribers.push(
+      context.data.on("tui.session.select", () => {
+        activeSessionID = currentSessionID()
+        invalidate()
+      }),
+    )
 
     // V1's message.removed / message.part.removed: history changed under us.
     unsubscribers.push(

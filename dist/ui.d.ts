@@ -1,5 +1,6 @@
 import type { Context } from "@opencode/plugin/tui/context";
 import type { SuggestionStore } from "./state.ts";
+export declare function isShellPlaceholder(placeholder: unknown): boolean;
 /**
  * Renders the suggestion into the prompt textarea's placeholder. There is no
  * slot inside the input in V2, so the controller writes the placeholder

@@ -6,6 +6,10 @@ const ARROW_KEYS = {
     up: "↑",
     down: "↓",
 };
+const SHELL_PLACEHOLDER_PREFIX = "Run a command";
+export function isShellPlaceholder(placeholder) {
+    return typeof placeholder === "string" && placeholder.startsWith(SHELL_PLACEHOLDER_PREFIX);
+}
 function displayKey(key) {
     return ARROW_KEYS[key] ?? key;
 }
@@ -36,6 +40,8 @@ export function createPlaceholderController(context, store, sessionID, acceptKey
             editor: editor !== null,
         });
         if (!editor)
+            return;
+        if (isShellPlaceholder(editor.placeholder))
             return;
         if (current.kind === "ready" && current.sessionID === sessionID()) {
             const desired = marker + current.text;
